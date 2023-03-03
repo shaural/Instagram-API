@@ -11,13 +11,22 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	"github.com/pkg/errors"
-	"github.com/thinkerou/favicon"
 )
 
 const (
-	mediaParams = "fields=id,username,caption,media_type,media_url,permalink,thumbnail_url,timestamp"
+	mediaParams = "fields=id,username,caption,media_type,media_url,permalink,thumbnail_url,timestamp,children{media_url}"
 )
+
+type Media struct {
+	Caption      string   `json:"caption"`
+	MediaType    string   `json:"media_type"`
+	MediaURLs    []string `json:"media_urls"`
+	Permalink    string   `json:"link"`
+	ThumbnailURL string   `json:"thumbnail"`
+	Timestamp    string   `json:"timestamp"` // switch to time.Time?
+}
 
 // Client instagram connection representation.
 type Client struct {
@@ -36,6 +45,16 @@ type Entry struct {
 	Permalink    string `json:"permalink"`
 	ThumbnailURL string `json:"thumbnail_url"`
 	Timestamp    string `json:"timestamp"`
+	Children     Child  `json:"children"`
+}
+
+type Child struct {
+	Data []ChildItem `json:"data"`
+}
+
+type ChildItem struct {
+	Id       string `json:"id"`
+	MediaURL string `json"media_url"`
 }
 
 // Paging represents endpoints for paging results if above limit (100)
@@ -62,9 +81,13 @@ func main() {
 }
 
 func init() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
 	// Starts a new Gin instance with no middle-ware
 	r := gin.New()
-	r.Use(favicon.New("./favicon.png"))
+	// r.Use(favicon.New("./favicon.png"))
 	// Define your handlers
 	r.GET("/", func(c *gin.Context) {
 		c.String(http.StatusOK, "instagram basic API")
@@ -108,10 +131,41 @@ func getJSON(c *gin.Context) {
 		} else {
 			counter += len(response.Data)
 		}
-		log.Printf("Received # media: %d. Counter: %d", len(response.Data), counter)
+		// log.Printf("Received # media: %d. Counter: %d", len(response.Data), counter)
+	}
+	var outM []Media
+	for _, m := range media {
+		var childURLs []string
+		if m.Children.Data != nil {
+			for _, child := range m.Children.Data {
+				childMedia, err := client.GetMediaWithId(child.Id)
+				if err != nil {
+					log.Println(err.Error())
+					c.Error(err)
+					c.AbortWithStatusJSON(http.StatusOK, gin.H{"error": true, "message": err.Error()})
+					return
+				}
+				log.Println(childMedia)
+				if len(childMedia.Data) > 0 {
+					childURLs = append(childURLs, childMedia.Data[0].MediaURL)
+				}
+			}
+		}
+		outM = append(outM, *newMedia(m.Caption, m.MediaType, m.Permalink, m.ThumbnailURL, m.Timestamp, childURLs))
 	}
 	c.JSON(http.StatusOK, media)
 	return
+}
+
+func newMedia(caption, mType, perm, thumb, time string, urls []string) *Media {
+	return &Media{
+		Caption:      caption,
+		MediaType:    mType,
+		MediaURLs:    urls,
+		Permalink:    perm,
+		ThumbnailURL: thumb,
+		Timestamp:    time,
+	}
 }
 
 // NewClient creates a new client with a given accessToken and clientSecret.
@@ -167,7 +221,20 @@ func (c *Client) GetMedia(limit string, next string) (*MediaResp, error) {
 	} else {
 		url = next
 	}
-	log.Println(url)
+	// log.Println(url)
+	bytes, err := c.fetch(url)
+	if err != nil {
+		return nil, err
+	}
+	if err = json.Unmarshal(bytes, &resp); err != nil {
+		return nil, errors.Wrapf(err, "unable to Unmarshal json response: %s", string(bytes))
+	}
+	return &resp, nil
+}
+
+func (c *Client) GetMediaWithId(id string) (*MediaResp, error) {
+	var resp MediaResp
+	url := fmt.Sprintf("%s/%s?access_token=%s", c.baseURL, id, c.accessToken)
 	bytes, err := c.fetch(url)
 	if err != nil {
 		return nil, err

@@ -3,3 +3,4 @@ bin/**
 *.txt
 go.sum
 favicon.png
+.env
